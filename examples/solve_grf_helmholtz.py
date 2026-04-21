@@ -24,6 +24,13 @@ def main() -> None:
     parser.add_argument("--precision", choices=("float32", "float64"), default="float64")
     parser.add_argument("--fast-spectral", action="store_true")
     parser.add_argument("--npoles", type=int, default=1)
+    parser.add_argument("--ppw-min", type=float, default=2.25)
+    parser.add_argument(
+        "--frequency-cycles",
+        type=float,
+        default=None,
+        help="Nondimensional frequency omega/(2*pi) across the unit-width grid.",
+    )
     args = parser.parse_args()
 
     config.update("jax_enable_x64", args.precision == "float64")
@@ -42,8 +49,13 @@ def main() -> None:
     wavespeed = grf_to_wavespeed(grf, contrast_strength=args.contrast_strength)
     np.save(wavespeed_path, np.asarray(wavespeed))
 
-    ppw_min = 2.25
-    kh_max = 2 * jnp.pi / ppw_min
+    if args.frequency_cycles is None:
+        frequency_cycles = args.n / args.ppw_min
+        ppw_min = args.ppw_min
+    else:
+        frequency_cycles = args.frequency_cycles
+        ppw_min = args.n / frequency_cycles
+    kh_max = 2 * jnp.pi * frequency_cycles / args.n
     op = mat_setup_from_wavespeed(wavespeed, kh_max, sparse=False, dtype=real_dtype)
 
     rhs = point_source(op.n, dtype=complex_dtype)
@@ -95,6 +107,7 @@ def main() -> None:
     print(f"wavespeed wrote {wavespeed_path}")
     print(f"pressure wrote {pressure_path}")
     print(f"n={op.n} size={op.size} rho={op.rho}")
+    print(f"frequency_cycles={frequency_cycles:.6e} ppw_min={ppw_min:.6e} kh_max={kh_max:.6e}")
     print(f"wavespeed min={jnp.min(wavespeed):.6e} max={jnp.max(wavespeed):.6e}")
     print(f"residual history wrote {residual_path}")
     print(f"total matvecs={total_matvecs}")
