@@ -50,6 +50,20 @@ class ShiftedSolveSample:
     niter: int
 
 
+@dataclass(frozen=True)
+class ShiftedSolveRequest:
+    """Inputs for a custom shifted-solve backend."""
+
+    pole_index: int
+    rhs: Array
+    shift: Array
+    weight: Array
+    z0: Array
+    d: Array
+    q: int
+    niter: int
+
+
 def fci_apply_spectral_jit(
     rhs: Array,
     op: HelmholtzOperator,
@@ -60,6 +74,8 @@ def fci_apply_spectral_jit(
     inner_alpha: float | None = None,
     profile: bool = False,
     shifted_sample_callback: Callable[[ShiftedSolveSample], None] | None = None,
+    shifted_solver_callback: Callable[[ShiftedSolveRequest], Array] | None = None,
+    shifted_solver_cleanup_steps: int = 0,
 ) -> FastFCIResult:
     """Apply one FCI step using JIT-compiled spectral kernels.
 
@@ -80,6 +96,9 @@ def fci_apply_spectral_jit(
             "inner_solver must be 'gmres', 'none', 'richardson', or 'chebyshev'."
         )
 
+    if shifted_solver_cleanup_steps < 0:
+        raise ValueError("shifted_solver_cleanup_steps must be non-negative.")
+
     total_start = time.perf_counter() if profile else 0.0
     shifted_solve_seconds: list[float] = []
     contour_combine_seconds = 0.0
@@ -96,17 +115,53 @@ def fci_apply_spectral_jit(
         z = params.shifts[p].astype(rhs_grid.dtype)
         z0 = jnp.asarray(complex(params.bet[0], complex(params.shifts[p]).imag), dtype=rhs_grid.dtype)
         pole_start = time.perf_counter() if profile else 0.0
-        v_grid = _exp_poly_grid_jit(
-            rhs_grid,
-            z,
-            op.mass,
-            op.damping,
-            op.stiffness_eigs,
-            z0,
-            params.d[p].astype(op.mass.dtype),
-            int(params.q[p]),
-            int(params.num[p]),
-        )
+        q = int(params.q[p])
+        niter = int(params.num[p])
+        d = params.d[p].astype(op.mass.dtype)
+        if shifted_solver_callback is None:
+            v_grid = _exp_poly_grid_jit(
+                rhs_grid,
+                z,
+                op.mass,
+                op.damping,
+                op.stiffness_eigs,
+                z0,
+                d,
+                q,
+                niter,
+            )
+            matvecs += q * niter
+        else:
+            v_grid = shifted_solver_callback(
+                ShiftedSolveRequest(
+                    pole_index=p,
+                    rhs=rhs_grid,
+                    shift=z,
+                    weight=params.weights[p].astype(rhs_grid.dtype),
+                    z0=z0,
+                    d=d,
+                    q=q,
+                    niter=niter,
+                )
+            )
+            if shifted_solver_cleanup_steps > 0:
+                shifted_residual_rhs = rhs_grid - (
+                    _helmop_grid_jit(v_grid, op.mass, op.damping, op.stiffness_eigs)
+                    - z * v_grid
+                )
+                correction_grid = _exp_poly_grid_jit(
+                    shifted_residual_rhs,
+                    z,
+                    op.mass,
+                    op.damping,
+                    op.stiffness_eigs,
+                    z0,
+                    d,
+                    q,
+                    shifted_solver_cleanup_steps,
+                )
+                v_grid = v_grid + correction_grid
+                matvecs += q * shifted_solver_cleanup_steps
         if profile:
             _block_until_ready(v_grid)
             shifted_solve_seconds.append(time.perf_counter() - pole_start)
@@ -128,9 +183,9 @@ def fci_apply_spectral_jit(
                     shift=z,
                     weight=params.weights[p].astype(rhs_grid.dtype),
                     z0=z0,
-                    d=params.d[p].astype(op.mass.dtype),
-                    q=int(params.q[p]),
-                    niter=int(params.num[p]),
+                    d=d,
+                    q=q,
+                    niter=niter,
                 )
             )
             if profile:
@@ -141,7 +196,6 @@ def fci_apply_spectral_jit(
         if profile:
             _block_until_ready(u_grid)
             contour_combine_seconds += time.perf_counter() - combine_start
-        matvecs += int(params.q[p]) * int(params.num[p])
 
     postprocess_start = time.perf_counter() if profile else 0.0
     au_grid = _helmop_grid_jit(u_grid, op.mass, op.damping, op.stiffness_eigs)

@@ -161,6 +161,24 @@ def test_fast_spectral_fci_smoke():
     assert samples[0].solution.shape == op.n
     assert samples[0].shifted_residual.shape == op.n
 
+    requests = []
+
+    def zero_shifted_solver(request):
+        requests.append(request)
+        return jnp.zeros(op.n, dtype=jnp.complex128)
+
+    result_custom_shifted = fci_apply_spectral_jit(
+        flatten_grid(rhs_grid),
+        op,
+        params,
+        inner_solver="none",
+        shifted_solver_callback=zero_shifted_solver,
+        shifted_solver_cleanup_steps=1,
+    )
+    assert result_custom_shifted.u.shape == (op.size,)
+    assert len(requests) == 1
+    assert requests[0].rhs.shape == op.n
+
 
 def test_low_frequency_gmres_smoke():
     from jax import config

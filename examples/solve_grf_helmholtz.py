@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import time
 
 from jax import config
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -38,6 +40,30 @@ def main() -> None:
     parser.add_argument("--fast-spectral", action="store_true")
     parser.add_argument("--npoles", type=int, default=1)
     parser.add_argument("--krylov-dim", type=int, default=20)
+    parser.add_argument(
+        "--shifted-solver",
+        choices=("exp-poly", "neural"),
+        default="exp-poly",
+        help="Shifted-solve backend used by --fast-spectral.",
+    )
+    parser.add_argument(
+        "--neural-checkpoint",
+        type=Path,
+        default=None,
+        help="Flax msgpack checkpoint for --shifted-solver neural.",
+    )
+    parser.add_argument(
+        "--neural-config",
+        type=Path,
+        default=None,
+        help="Training config JSON. Defaults to config.json next to --neural-checkpoint.",
+    )
+    parser.add_argument(
+        "--neural-cleanup-steps",
+        type=int,
+        default=0,
+        help="Polynomial shifted-solve correction steps after neural prediction.",
+    )
     parser.add_argument(
         "--inner-solver",
         choices=("gmres", "none", "richardson", "chebyshev"),
@@ -107,6 +133,13 @@ def main() -> None:
         parser.error("--training-data-out currently requires --fast-spectral.")
     if args.training_data_only and args.training_data_out is None:
         parser.error("--training-data-only requires --training-data-out.")
+    if args.shifted_solver == "neural":
+        if not args.fast_spectral:
+            parser.error("--shifted-solver neural requires --fast-spectral.")
+        if args.neural_checkpoint is None:
+            parser.error("--shifted-solver neural requires --neural-checkpoint.")
+    if args.neural_cleanup_steps < 0:
+        parser.error("--neural-cleanup-steps must be non-negative.")
     if args.batch_size < 1:
         parser.error("--batch-size must be positive.")
     if args.max_shifted_samples is not None and args.max_shifted_samples < 1:
@@ -152,6 +185,13 @@ def main() -> None:
             + ",".join(TRAINING_CHANNELS),
             flush=True,
         )
+    neural_predictor = None
+    if args.shifted_solver == "neural":
+        neural_predictor = load_neural_shifted_predictor(
+            args.neural_checkpoint,
+            args.neural_config,
+            (args.n, args.n, args.n),
+        )
 
     for batch_index, grf_np in enumerate(grf_batch):
         sample_seed = args.seed + batch_index
@@ -172,6 +212,7 @@ def main() -> None:
             shifted_sample_dir=shifted_sample_dir,
             shifted_sample_counter=shifted_sample_counter,
             training_samples=training_samples,
+            neural_predictor=neural_predictor,
         )
 
     elapsed = time.perf_counter() - start_time
@@ -225,6 +266,7 @@ def solve_one_grf(
     shifted_sample_dir: Path | None,
     shifted_sample_counter: dict[str, int],
     training_samples: list[np.ndarray] | None,
+    neural_predictor,
 ) -> None:
     pressure_path = Path(f"data/pressure_{label}.npy")
     residual_path = Path(f"data/residual_history_{label}.npy")
@@ -277,6 +319,7 @@ def solve_one_grf(
 
     for step in range(1, args.max_refinement_steps + 1):
         shifted_sample_callback = None
+        shifted_solver_callback = None
         callbacks = []
         relres_before = None
 
@@ -290,6 +333,19 @@ def solve_one_grf(
         wants_training_sample = training_samples is not None
         if wants_npz_sample or wants_training_sample:
             relres_before = float(jnp.linalg.norm(residual) / rhs_norm)
+        if neural_predictor is not None:
+            relres_before = (
+                float(jnp.linalg.norm(residual) / rhs_norm)
+                if relres_before is None
+                else relres_before
+            )
+            shifted_solver_callback = make_neural_shifted_solver_callback(
+                predictor=neural_predictor,
+                op=op,
+                kh_max=float(kh_max),
+                step=step,
+                relres_before=relres_before,
+            )
 
         if wants_npz_sample:
             callbacks.append(
@@ -327,6 +383,8 @@ def solve_one_grf(
                 inner_alpha=args.inner_alpha,
                 profile=args.profile_fci,
                 shifted_sample_callback=shifted_sample_callback,
+                shifted_solver_callback=shifted_solver_callback,
+                shifted_solver_cleanup_steps=args.neural_cleanup_steps,
             )
             step_solution = result.u
             step_residual = result.residual
@@ -395,6 +453,78 @@ def combine_callbacks(callbacks):
             callback(sample)
 
     return combined
+
+
+def load_neural_shifted_predictor(
+    checkpoint_path: Path,
+    config_path: Path | None,
+    grid_shape: tuple[int, int, int],
+):
+    from flax import serialization
+
+    from jax_helmholtz.surrogate import INPUT_CHANNELS, ShiftedUNet3D
+
+    config_path = config_path or checkpoint_path.with_name("config.json")
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Neural config not found at {config_path}. Pass --neural-config explicitly."
+        )
+    model_config = json.loads(config_path.read_text())
+    base_channels = int(model_config.get("base_channels", 16))
+    depth = int(model_config.get("depth", 3))
+    model = ShiftedUNet3D(base_channels=base_channels, depth=depth)
+    dummy = jnp.zeros((1, len(INPUT_CHANNELS), *grid_shape), dtype=jnp.float32)
+    template = model.init(jax.random.PRNGKey(0), dummy)["params"]
+    params = serialization.from_bytes(template, checkpoint_path.read_bytes())
+
+    @jax.jit
+    def predict(params, inputs):
+        return model.apply({"params": params}, inputs)
+
+    print(
+        "loaded neural shifted solver "
+        f"checkpoint={checkpoint_path} config={config_path} "
+        f"base_channels={base_channels} depth={depth}",
+        flush=True,
+    )
+    return {"params": params, "predict": predict}
+
+
+def make_neural_shifted_solver_callback(
+    *,
+    predictor,
+    op,
+    kh_max: float,
+    step: int,
+    relres_before: float,
+):
+    mass = op.mass.astype(jnp.float32)
+    damping = op.damping.astype(jnp.float32)
+    shape = op.n
+
+    def solve_shifted(request):
+        rhs = request.rhs.astype(jnp.complex64)
+        shift = request.shift.astype(jnp.complex64)
+        inputs = jnp.stack(
+            [
+                mass,
+                damping,
+                jnp.real(rhs).astype(jnp.float32),
+                jnp.imag(rhs).astype(jnp.float32),
+                jnp.full(shape, jnp.real(shift), dtype=jnp.float32),
+                jnp.full(shape, jnp.imag(shift), dtype=jnp.float32),
+                jnp.full(shape, kh_max, dtype=jnp.float32),
+                jnp.full(shape, relres_before, dtype=jnp.float32),
+                jnp.full(shape, step, dtype=jnp.float32),
+                jnp.full(shape, request.pole_index, dtype=jnp.float32),
+            ],
+            axis=0,
+        )[None, ...]
+        pred = predictor["predict"](predictor["params"], inputs)[0]
+        v = pred[0] + 1j * pred[1]
+        return v.astype(request.rhs.dtype)
+
+    return solve_shifted
 
 
 def make_training_tensor_callback(

@@ -91,3 +91,22 @@ The model predicts `shifted_solution_real` and `shifted_solution_imag`
 directly. The loss combines relative supervised error and the shifted-system
 physics residual `||(A - zI)v_pred - r|| / ||r||`, using the spectral
 Helmholtz operator in JAX.
+
+Run FCI with a trained neural shifted-solver checkpoint:
+
+```bash
+python3 examples/solve_grf_helmholtz.py \
+  --n 64 \
+  --seed 0 \
+  --precision float32 \
+  --fast-spectral \
+  --inner-solver none \
+  --shifted-solver neural \
+  --neural-checkpoint checkpoints/shifted_unet_64/best.msgpack \
+  --neural-cleanup-steps 1 \
+  --profile-fci
+```
+
+`--neural-cleanup-steps` applies a small number of exponential-polynomial
+correction steps after the network prediction. Set it to `0` to benchmark the
+raw neural shifted solve.
