@@ -147,6 +147,20 @@ def test_fast_spectral_fci_smoke():
     assert result_chebyshev.u.shape == (op.size,)
     assert jnp.all(jnp.isfinite(result_chebyshev.u))
 
+    samples = []
+    result_sampled = fci_apply_spectral_jit(
+        flatten_grid(rhs_grid),
+        op,
+        params,
+        inner_solver="none",
+        shifted_sample_callback=samples.append,
+    )
+    assert result_sampled.u.shape == (op.size,)
+    assert len(samples) == 1
+    assert samples[0].rhs.shape == op.n
+    assert samples[0].solution.shape == op.n
+    assert samples[0].shifted_residual.shape == op.n
+
 
 def test_low_frequency_gmres_smoke():
     from jax import config

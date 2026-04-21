@@ -7,6 +7,7 @@ polynomial shifted solve with XLA, reducing Python dispatch overhead on GPUs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import math
 import time
@@ -33,6 +34,22 @@ class FastFCIResult:
     profile: FCIProfile | None = None
 
 
+@dataclass(frozen=True)
+class ShiftedSolveSample:
+    """One shifted-solve training pair from a spectral FCI pole."""
+
+    pole_index: int
+    rhs: Array
+    solution: Array
+    shifted_residual: Array
+    shift: Array
+    weight: Array
+    z0: Array
+    d: Array
+    q: int
+    niter: int
+
+
 def fci_apply_spectral_jit(
     rhs: Array,
     op: HelmholtzOperator,
@@ -42,6 +59,7 @@ def fci_apply_spectral_jit(
     inner_steps: int = 5,
     inner_alpha: float | None = None,
     profile: bool = False,
+    shifted_sample_callback: Callable[[ShiftedSolveSample], None] | None = None,
 ) -> FastFCIResult:
     """Apply one FCI step using JIT-compiled spectral kernels.
 
@@ -67,6 +85,7 @@ def fci_apply_spectral_jit(
     contour_combine_seconds = 0.0
     postprocess_seconds = 0.0
     inner_seconds = 0.0
+    sample_seconds = 0.0
 
     rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex64))
     rhs_grid = unflatten_grid(rhs, op.n)
@@ -91,6 +110,31 @@ def fci_apply_spectral_jit(
         if profile:
             _block_until_ready(v_grid)
             shifted_solve_seconds.append(time.perf_counter() - pole_start)
+
+        if shifted_sample_callback is not None:
+            sample_start = time.perf_counter() if profile else 0.0
+            shifted_residual_grid = (
+                _helmop_grid_jit(v_grid, op.mass, op.damping, op.stiffness_eigs)
+                - z * v_grid
+                - rhs_grid
+            )
+            _block_until_ready(shifted_residual_grid)
+            shifted_sample_callback(
+                ShiftedSolveSample(
+                    pole_index=p,
+                    rhs=rhs_grid,
+                    solution=v_grid,
+                    shifted_residual=shifted_residual_grid,
+                    shift=z,
+                    weight=params.weights[p].astype(rhs_grid.dtype),
+                    z0=z0,
+                    d=params.d[p].astype(op.mass.dtype),
+                    q=int(params.q[p]),
+                    niter=int(params.num[p]),
+                )
+            )
+            if profile:
+                sample_seconds += time.perf_counter() - sample_start
 
         combine_start = time.perf_counter() if profile else 0.0
         u_grid = u_grid + params.weights[p].astype(rhs_grid.dtype) * v_grid
@@ -175,6 +219,7 @@ def fci_apply_spectral_jit(
             contour_combine_seconds=contour_combine_seconds,
             postprocess_seconds=postprocess_seconds,
             inner_seconds=inner_seconds,
+            sample_seconds=sample_seconds,
         )
     return FastFCIResult(
         u=flatten_grid(u_grid),

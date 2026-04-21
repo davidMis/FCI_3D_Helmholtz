@@ -52,6 +52,7 @@ class FCIProfile:
     contour_combine_seconds: float
     postprocess_seconds: float
     inner_seconds: float
+    sample_seconds: float = 0.0
 
     @property
     def shifted_total_seconds(self) -> float:
