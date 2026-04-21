@@ -115,6 +115,7 @@ def test_fast_spectral_fci_smoke():
     result = fci_apply_spectral_jit(flatten_grid(rhs_grid), op, params)
 
     assert result.u.shape == (op.size,)
+    assert result.residual.shape == (op.size,)
     assert jnp.all(jnp.isfinite(result.u))
 
     result_no_inner = fci_apply_spectral_jit(

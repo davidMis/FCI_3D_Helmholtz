@@ -25,6 +25,8 @@ Array = jnp.ndarray
 @dataclass(frozen=True)
 class FastFCIResult:
     u: Array
+    residual: Array
+    relres: Array
     matvecs_estimate: int
     inner_info: int | Array
 
@@ -128,8 +130,12 @@ def fci_apply_spectral_jit(
         info = 0
         matvecs_estimate = matvecs + 1
 
+    final_residual = flatten_grid(residual_grid)
+    relres = jnp.linalg.norm(residual_grid) / jnp.linalg.norm(rhs_grid)
     return FastFCIResult(
         u=flatten_grid(u_grid),
+        residual=final_residual,
+        relres=relres,
         matvecs_estimate=matvecs_estimate,
         inner_info=info,
     )

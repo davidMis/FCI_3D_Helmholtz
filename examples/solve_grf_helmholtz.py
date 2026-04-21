@@ -38,6 +38,9 @@ def main() -> None:
         default=None,
         help="Richardson step size. Omit to use an automatic residual-line step.",
     )
+    parser.add_argument("--no-save-pressure", action="store_true")
+    parser.add_argument("--no-save-wavespeed", action="store_true")
+    parser.add_argument("--save-slices-only", action="store_true")
     parser.add_argument("--ppw-min", type=float, default=2.25)
     parser.add_argument(
         "--frequency-cycles",
@@ -61,7 +64,11 @@ def main() -> None:
     start_time = time.perf_counter()
     grf = jnp.asarray(np.load(field_path), dtype=real_dtype)
     wavespeed = grf_to_wavespeed(grf, contrast_strength=args.contrast_strength)
-    np.save(wavespeed_path, np.asarray(wavespeed))
+    if not args.no_save_wavespeed:
+        if args.save_slices_only:
+            np.save(sliced_path(wavespeed_path), center_slices(np.asarray(wavespeed)))
+        else:
+            np.save(wavespeed_path, np.asarray(wavespeed))
 
     if args.frequency_cycles is None:
         frequency_cycles = args.n / args.ppw_min
@@ -71,6 +78,7 @@ def main() -> None:
         ppw_min = args.n / frequency_cycles
     kh_max = 2 * jnp.pi * frequency_cycles / args.n
     op = mat_setup_from_wavespeed(wavespeed, kh_max, sparse=False, dtype=real_dtype)
+    print_memory_estimate(op.n, real_dtype, complex_dtype)
 
     rhs = point_source(op.n, dtype=complex_dtype)
     params = fci_setup(
@@ -101,15 +109,21 @@ def main() -> None:
                 inner_alpha=args.inner_alpha,
             )
             step_solution = result.u
+            step_residual = result.residual
             step_matvecs = result.matvecs_estimate
         else:
             result = fci_apply(residual, op, params)
             step_solution = result.u
+            step_residual = None
             step_matvecs = result.matvecs + 1
 
         u = u + step_solution
-        residual = rhs - jit_helmop(u, op)
-        relres = float(jnp.linalg.norm(residual) / rhs_norm)
+        if step_residual is None:
+            residual = rhs - jit_helmop(u, op)
+            relres = float(jnp.linalg.norm(residual) / rhs_norm)
+        else:
+            residual = step_residual
+            relres = float(jnp.linalg.norm(residual) / rhs_norm)
         total_matvecs += step_matvecs
         residual_history.append(relres)
         print(
@@ -122,12 +136,26 @@ def main() -> None:
             break
 
     pressure = jnp.reshape(u, op.n, order="F")
-    np.save(pressure_path, np.asarray(pressure))
+    if not args.no_save_pressure:
+        if args.save_slices_only:
+            np.save(sliced_path(pressure_path), center_slices(np.asarray(pressure)))
+        else:
+            np.save(pressure_path, np.asarray(pressure))
     np.save(residual_path, np.asarray(residual_history))
     elapsed = time.perf_counter() - start_time
 
-    print(f"wavespeed wrote {wavespeed_path}")
-    print(f"pressure wrote {pressure_path}")
+    if args.no_save_wavespeed:
+        print("wavespeed save skipped")
+    elif args.save_slices_only:
+        print(f"wavespeed slices wrote {sliced_path(wavespeed_path)}")
+    else:
+        print(f"wavespeed wrote {wavespeed_path}")
+    if args.no_save_pressure:
+        print("pressure save skipped")
+    elif args.save_slices_only:
+        print(f"pressure slices wrote {sliced_path(pressure_path)}")
+    else:
+        print(f"pressure wrote {pressure_path}")
     print(f"n={op.n} size={op.size} rho={op.rho}")
     print(f"frequency_cycles={frequency_cycles:.6e} ppw_min={ppw_min:.6e} kh_max={kh_max:.6e}")
     print(f"wavespeed min={jnp.min(wavespeed):.6e} max={jnp.max(wavespeed):.6e}")
@@ -148,6 +176,41 @@ def point_source(shape: tuple[int, int, int], *, dtype) -> jnp.ndarray:
     center = tuple(v // 2 for v in shape)
     source = source.at[center].set(1 + 0j)
     return flatten_grid(source)
+
+
+def center_slices(arr: np.ndarray) -> np.ndarray:
+    center = tuple(v // 2 for v in arr.shape[:3])
+    return np.stack(
+        [
+            arr[center[0], :, :],
+            arr[:, center[1], :],
+            arr[:, :, center[2]],
+        ],
+        axis=0,
+    )
+
+
+def sliced_path(path: Path) -> Path:
+    return path.with_name(path.stem + "_center_slices" + path.suffix)
+
+
+def print_memory_estimate(
+    shape: tuple[int, int, int],
+    real_dtype,
+    complex_dtype,
+) -> None:
+    npoints = int(np.prod(shape))
+    real_bytes = np.dtype(np.float32 if real_dtype == jnp.float32 else np.float64).itemsize
+    complex_bytes = np.dtype(np.complex64 if complex_dtype == jnp.complex64 else np.complex128).itemsize
+    real_gb = npoints * real_bytes / 1024**3
+    complex_gb = npoints * complex_bytes / 1024**3
+    print(
+        "memory estimate "
+        f"grid={shape} real_vector={real_gb:.3f}GB "
+        f"complex_vector={complex_gb:.3f}GB "
+        f"baseline_fields≈{(3 * real_gb + 4 * complex_gb):.3f}GB",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
