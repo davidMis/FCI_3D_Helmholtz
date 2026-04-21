@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "JAX port of the fast contour integration 3D Helmholtz solver."
 requires-python = ">=3.10"
 dependencies = [
+    "flax",
     "jax",
+    "numpy",
+    "optax",
+    "wandb",
 ]
 
 [project.optional-dependencies]

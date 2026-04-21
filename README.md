@@ -49,3 +49,27 @@ residual-history, and per-sample side files while generating the tensor.
 For debugging or metadata-rich exports, the older `--save-shifted-samples`
 option still writes one `medium_*.npz` file and one `shifted_sample_*.npz`
 file per captured pole/refinement step.
+
+## Shifted-solver surrogate training
+
+Train the first JAX/Flax 3D U-Net surrogate with W&B logging:
+
+```bash
+python3 examples/train_shifted_surrogate.py \
+  --train data/train_shifted_64.npy \
+  --val data/val_shifted_64.npy \
+  --test data/test_shifted_64.npy \
+  --checkpoint-dir checkpoints/shifted_unet_64 \
+  --epochs 50 \
+  --batch-size 1 \
+  --base-channels 16 \
+  --depth 3 \
+  --learning-rate 1e-4 \
+  --physics-weight 1.0 \
+  --wandb-project fci-shifted-surrogate
+```
+
+The model predicts `shifted_solution_real` and `shifted_solution_imag`
+directly. The loss combines relative supervised error and the shifted-system
+physics residual `||(A - zI)v_pred - r|| / ||r||`, using the spectral
+Helmholtz operator in JAX.

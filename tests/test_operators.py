@@ -183,3 +183,21 @@ def test_low_frequency_gmres_smoke():
     assert result.u.shape == (op.size,)
     assert result.residual_history.shape[0] >= 1
     assert jnp.all(jnp.isfinite(result.u))
+
+
+def test_shifted_unet_output_shape():
+    pytest.importorskip("flax")
+
+    from jax import config
+    import jax
+    import jax.numpy as jnp
+
+    from jax_helmholtz.surrogate import INPUT_CHANNELS, ShiftedUNet3D
+
+    config.update("jax_enable_x64", True)
+    model = ShiftedUNet3D(base_channels=4, depth=2)
+    x = jnp.zeros((1, len(INPUT_CHANNELS), 8, 8, 8), dtype=jnp.float32)
+    params = model.init(jax.random.PRNGKey(0), x)
+    y = model.apply(params, x)
+
+    assert y.shape == (1, 2, 8, 8, 8)
