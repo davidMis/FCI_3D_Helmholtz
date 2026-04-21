@@ -27,9 +27,16 @@ def main() -> None:
     parser.add_argument("--krylov-dim", type=int, default=20)
     parser.add_argument(
         "--inner-solver",
-        choices=("gmres", "none"),
+        choices=("gmres", "none", "richardson"),
         default="gmres",
         help="Inner correction used by --fast-spectral. Use 'none' for very large grids.",
+    )
+    parser.add_argument("--inner-steps", type=int, default=5)
+    parser.add_argument(
+        "--inner-alpha",
+        type=float,
+        default=None,
+        help="Richardson step size. Omit to use an automatic residual-line step.",
     )
     parser.add_argument("--ppw-min", type=float, default=2.25)
     parser.add_argument(
@@ -90,6 +97,8 @@ def main() -> None:
                 op,
                 params,
                 inner_solver=args.inner_solver,
+                inner_steps=args.inner_steps,
+                inner_alpha=args.inner_alpha,
             )
             step_solution = result.u
             step_matvecs = result.matvecs_estimate

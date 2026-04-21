@@ -35,6 +35,8 @@ def fci_apply_spectral_jit(
     params: FCIParameters,
     *,
     inner_solver: str = "gmres",
+    inner_steps: int = 5,
+    inner_alpha: float | None = None,
 ) -> FastFCIResult:
     """Apply one FCI step using JIT-compiled spectral kernels.
 
@@ -50,8 +52,8 @@ def fci_apply_spectral_jit(
         raise ValueError("fci_apply_spectral_jit supports only nblock=1, method=1.")
     if op.stiffness_eigs is None:
         raise ValueError("spectral mode requires stiffness_eigs.")
-    if inner_solver not in {"gmres", "none"}:
-        raise ValueError("inner_solver must be 'gmres' or 'none'.")
+    if inner_solver not in {"gmres", "none", "richardson"}:
+        raise ValueError("inner_solver must be 'gmres', 'none', or 'richardson'.")
 
     rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex64))
     rhs_grid = unflatten_grid(rhs, op.n)
@@ -78,8 +80,8 @@ def fci_apply_spectral_jit(
     au_grid = _helmop_grid_jit(u_grid, op.mass, op.damping, op.stiffness_eigs)
     c = jnp.vdot(au_grid, rhs_grid) / jnp.vdot(au_grid, au_grid)
     u_grid = c * u_grid
+    residual_grid = rhs_grid - c * au_grid
     if inner_solver == "gmres":
-        residual_grid = rhs_grid - c * au_grid
         restart_cycles = max(1, math.ceil(max(matvecs, 1) * 2 / params.krylov_dim))
         correction_grid, info = jax_gmres(
             lambda x: _helmop_grid_jit(x, op.mass, op.damping, op.stiffness_eigs),
@@ -91,6 +93,23 @@ def fci_apply_spectral_jit(
         )
         u_grid = u_grid + correction_grid
         matvecs_estimate = matvecs + restart_cycles * params.krylov_dim + 1
+    elif inner_solver == "richardson":
+        alpha = (
+            _auto_richardson_alpha(residual_grid, op.mass, op.damping, op.stiffness_eigs)
+            if inner_alpha is None
+            else jnp.asarray(inner_alpha, dtype=op.mass.dtype)
+        )
+        u_grid, residual_grid = _richardson_inner_jit(
+            u_grid,
+            residual_grid,
+            op.mass,
+            op.damping,
+            op.stiffness_eigs,
+            alpha,
+            inner_steps,
+        )
+        info = 0
+        matvecs_estimate = matvecs + inner_steps + 1
     else:
         info = 0
         matvecs_estimate = matvecs + 1
@@ -150,5 +169,44 @@ def exp_poly_grid(
     return jax.lax.fori_loop(0, niter, outer_body, jnp.zeros_like(rhs))
 
 
+def richardson_inner(
+    u: Array,
+    residual: Array,
+    mass: Array,
+    damping: Array,
+    stiffness_eigs: Array,
+    alpha: Array,
+    steps: int,
+) -> tuple[Array, Array]:
+    """Fixed-memory Richardson correction on ``A u = rhs`` residual."""
+
+    def body(_, state):
+        u_curr, r_curr = state
+        u_next = u_curr + alpha * r_curr
+        r_next = r_curr - alpha * helmop_spectral_grid(
+            r_curr,
+            mass,
+            damping,
+            stiffness_eigs,
+        )
+        return u_next, r_next
+
+    return jax.lax.fori_loop(0, steps, body, (u, residual))
+
+
+def auto_richardson_alpha(
+    residual: Array,
+    mass: Array,
+    damping: Array,
+    stiffness_eigs: Array,
+) -> Array:
+    """Residual-line minimum step for one Richardson correction."""
+
+    ar = helmop_spectral_grid(residual, mass, damping, stiffness_eigs)
+    return jnp.vdot(ar, residual) / jnp.vdot(ar, ar)
+
+
 _helmop_grid_jit = jax.jit(helmop_spectral_grid)
 _exp_poly_grid_jit = jax.jit(exp_poly_grid, static_argnames=("q", "niter"))
+_richardson_inner_jit = jax.jit(richardson_inner, static_argnames=("steps",))
+_auto_richardson_alpha = jax.jit(auto_richardson_alpha)
