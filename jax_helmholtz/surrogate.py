@@ -7,23 +7,7 @@ from collections.abc import Sequence
 import flax.linen as nn
 import jax.numpy as jnp
 
-
-TRAINING_CHANNELS = (
-    "mass",
-    "damping",
-    "residual_real",
-    "residual_imag",
-    "shifted_solution_real",
-    "shifted_solution_imag",
-    "shifted_residual_real",
-    "shifted_residual_imag",
-    "shift_real",
-    "shift_imag",
-    "kh_max",
-    "relres_before",
-    "step",
-    "pole_index",
-)
+from .training_data import TRAINING_CHANNELS
 
 INPUT_CHANNELS = (0, 1, 2, 3, 8, 9, 10, 11, 12, 13)
 TARGET_CHANNELS = (4, 5)

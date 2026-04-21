@@ -12,24 +12,7 @@ import numpy as np
 
 from jax_helmholtz import fci_apply, fci_apply_spectral_jit, fci_setup, flatten_grid, jit_helmop
 from jax_helmholtz import mat_setup_from_wavespeed
-
-
-TRAINING_CHANNELS = (
-    "mass",
-    "damping",
-    "residual_real",
-    "residual_imag",
-    "shifted_solution_real",
-    "shifted_solution_imag",
-    "shifted_residual_real",
-    "shifted_residual_imag",
-    "shift_real",
-    "shift_imag",
-    "kh_max",
-    "relres_before",
-    "step",
-    "pole_index",
-)
+from jax_helmholtz.training_data import TRAINING_CHANNELS
 
 
 def main() -> None:

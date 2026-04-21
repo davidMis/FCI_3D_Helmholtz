@@ -46,6 +46,24 @@ The solver can write one training tensor with shape
 Use `--training-data-only` to suppress the regular pressure, wavespeed,
 residual-history, and per-sample side files while generating the tensor.
 
+To generate training data without writing intermediate GRF files, use the
+one-stage random-step generator:
+
+```bash
+python3 examples/generate_random_step_training_data.py \
+  --n 64 \
+  --num-grfs 8 \
+  --seed 0 \
+  --precision float32 \
+  --inner-solver none \
+  --max-refinement-steps 10 \
+  --output data/shifted_training_64_seed0_random_steps.npy
+```
+
+This writes one tensor with shape `(num_grfs, channels, n, n, n)`. Each GRF is
+generated in memory, one random refinement step and pole are captured, and the
+GRF is discarded before the next sample.
+
 For debugging or metadata-rich exports, the older `--save-shifted-samples`
 option still writes one `medium_*.npz` file and one `shifted_sample_*.npz`
 file per captured pole/refinement step.
