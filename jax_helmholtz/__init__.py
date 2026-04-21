@@ -1,6 +1,6 @@
 """JAX implementation of the FCI 3D Helmholtz solver."""
 
-from .fci import FCIParameters, FCIResult, fci_apply, fci_setup
+from .fci import FCIParameters, FCIProfile, FCIResult, fci_apply, fci_setup
 from .fast_spectral import FastFCIResult, fci_apply_spectral_jit
 from .gmres import GMRESResult, gmres
 from .low_frequency import GMRESSolveResult, solve_gmres_spectral
@@ -11,6 +11,7 @@ from .setup import HelmholtzOperator, mat_setup, mat_setup_from_wavespeed
 
 __all__ = [
     "FCIParameters",
+    "FCIProfile",
     "FCIResult",
     "FastFCIResult",
     "GMRESResult",

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
+import jax
 import jax.numpy as jnp
 
 from .gmres import gmres
@@ -38,6 +40,22 @@ class FCIResult:
     matvecs: int
     outer_relres: float
     inner_relres: float
+    profile: "FCIProfile | None" = None
+
+
+@dataclass(frozen=True)
+class FCIProfile:
+    """Wall-clock timing for one FCI application."""
+
+    total_seconds: float
+    shifted_solve_seconds: tuple[float, ...]
+    contour_combine_seconds: float
+    postprocess_seconds: float
+    inner_seconds: float
+
+    @property
+    def shifted_total_seconds(self) -> float:
+        return sum(self.shifted_solve_seconds)
 
 
 def fci_setup(
@@ -111,13 +129,25 @@ def fci_setup(
     )
 
 
-def fci_apply(rhs: Array, op: HelmholtzOperator, params: FCIParameters) -> FCIResult:
+def fci_apply(
+    rhs: Array,
+    op: HelmholtzOperator,
+    params: FCIParameters,
+    *,
+    profile: bool = False,
+) -> FCIResult:
     """Apply one FCI approximation/correction step to ``rhs``.
 
     This ports ``Matlab/fcisol.m``. It intentionally keeps Python-level loops for
     the first validation pass; contour-pole parallelism can be added with ``vmap``
     once the numerical behavior is verified.
     """
+
+    total_start = time.perf_counter() if profile else 0.0
+    shifted_solve_seconds: list[float] = []
+    contour_combine_seconds = 0.0
+    postprocess_seconds = 0.0
+    inner_seconds = 0.0
 
     rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex64))
     nrm0 = jnp.linalg.norm(rhs)
@@ -134,6 +164,7 @@ def fci_apply(rhs: Array, op: HelmholtzOperator, params: FCIParameters) -> FCIRe
         z = complex(params.shifts[p])
         tol = params.tol_outer * float(jnp.abs(params.weights[0] / params.weights[p]) ** 0.5)
 
+        pole_start = time.perf_counter() if profile else 0.0
         if params.method == 1:
             v, nmv1, relres = exp_poly(
                 shifted_rhs,
@@ -169,20 +200,33 @@ def fci_apply(rhs: Array, op: HelmholtzOperator, params: FCIParameters) -> FCIRe
         else:
             raise ValueError("method must be 1 for exp_poly or 2 for cheby_poly+GMRES.")
 
+        if profile:
+            _block_until_ready(v)
+            shifted_solve_seconds.append(time.perf_counter() - pole_start)
+
         nmvp += nmv1
         outer_relres = min(outer_relres, relres)
 
+        combine_start = time.perf_counter() if profile else 0.0
         if params.nblock == 2:
             v = v[n : 2 * n]
         u = u + params.weights[p] * v
+        if profile:
+            _block_until_ready(u)
+            contour_combine_seconds += time.perf_counter() - combine_start
 
     matvecs = nmvp
+    postprocess_start = time.perf_counter() if profile else 0.0
     v = jit_helmop(u, op)
     c = jnp.vdot(v, rhs) / jnp.vdot(v, v)
     u = c * u
     residual = rhs - c * v
+    if profile:
+        _block_until_ready((u, residual))
+        postprocess_seconds = time.perf_counter() - postprocess_start
 
     max_inner = max(1, int(jnp.ceil(nmvp * 2 / params.krylov_dim)) * params.krylov_dim)
+    inner_start = time.perf_counter() if profile else 0.0
     inner = gmres(
         lambda x: jit_helmop(x, op),
         residual,
@@ -192,10 +236,32 @@ def fci_apply(rhs: Array, op: HelmholtzOperator, params: FCIParameters) -> FCIRe
     )
     u = u + inner.x
     matvecs += inner.matvecs + 1
+    if profile:
+        _block_until_ready(u)
+        inner_seconds = time.perf_counter() - inner_start
+
+    timing = None
+    if profile:
+        timing = FCIProfile(
+            total_seconds=time.perf_counter() - total_start,
+            shifted_solve_seconds=tuple(shifted_solve_seconds),
+            contour_combine_seconds=contour_combine_seconds,
+            postprocess_seconds=postprocess_seconds,
+            inner_seconds=inner_seconds,
+        )
 
     return FCIResult(
         u=u,
         matvecs=matvecs,
         outer_relres=outer_relres,
         inner_relres=inner.relres,
+        profile=timing,
     )
+
+
+def _block_until_ready(value):
+    for leaf in jax.tree_util.tree_leaves(value):
+        block = getattr(leaf, "block_until_ready", None)
+        if block is not None:
+            block()
+    return value

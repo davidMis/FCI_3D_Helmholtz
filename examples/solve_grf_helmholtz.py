@@ -41,6 +41,11 @@ def main() -> None:
     parser.add_argument("--no-save-pressure", action="store_true")
     parser.add_argument("--no-save-wavespeed", action="store_true")
     parser.add_argument("--save-slices-only", action="store_true")
+    parser.add_argument(
+        "--profile-fci",
+        action="store_true",
+        help="Synchronize JAX phase boundaries and print per-step FCI timing.",
+    )
     parser.add_argument("--ppw-min", type=float, default=2.25)
     parser.add_argument(
         "--frequency-cycles",
@@ -79,6 +84,8 @@ def main() -> None:
     kh_max = 2 * jnp.pi * frequency_cycles / args.n
     op = mat_setup_from_wavespeed(wavespeed, kh_max, sparse=False, dtype=real_dtype)
     print_memory_estimate(op.n, real_dtype, complex_dtype)
+    if args.profile_fci and args.fast_spectral:
+        print("profile note: first fast-spectral step may include XLA compilation time", flush=True)
 
     rhs = point_source(op.n, dtype=complex_dtype)
     params = fci_setup(
@@ -107,12 +114,13 @@ def main() -> None:
                 inner_solver=args.inner_solver,
                 inner_steps=args.inner_steps,
                 inner_alpha=args.inner_alpha,
+                profile=args.profile_fci,
             )
             step_solution = result.u
             step_residual = result.residual
             step_matvecs = result.matvecs_estimate
         else:
-            result = fci_apply(residual, op, params)
+            result = fci_apply(residual, op, params, profile=args.profile_fci)
             step_solution = result.u
             step_residual = None
             step_matvecs = result.matvecs + 1
@@ -132,6 +140,8 @@ def main() -> None:
             f"step_matvecs={step_matvecs} total_matvecs={total_matvecs}",
             flush=True,
         )
+        if args.profile_fci and result.profile is not None:
+            print(format_fci_profile(step, result.profile), flush=True)
         if relres < args.solve_tol:
             break
 
@@ -192,6 +202,23 @@ def center_slices(arr: np.ndarray) -> np.ndarray:
 
 def sliced_path(path: Path) -> Path:
     return path.with_name(path.stem + "_center_slices" + path.suffix)
+
+
+def format_fci_profile(step: int, profile) -> str:
+    shifted = profile.shifted_total_seconds
+    total = profile.total_seconds
+    shifted_pct = 100 * shifted / total if total > 0 else 0.0
+    pole_times = ",".join(f"{value:.4f}" for value in profile.shifted_solve_seconds)
+    return (
+        "profile "
+        f"step={step} total_seconds={total:.4f} "
+        f"shifted_solve_seconds={shifted:.4f} "
+        f"shifted_pct={shifted_pct:.1f} "
+        f"pole_seconds=[{pole_times}] "
+        f"contour_combine_seconds={profile.contour_combine_seconds:.4f} "
+        f"postprocess_seconds={profile.postprocess_seconds:.4f} "
+        f"inner_seconds={profile.inner_seconds:.4f}"
+    )
 
 
 def print_memory_estimate(

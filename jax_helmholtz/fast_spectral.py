@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import time
 
 import jax
 import jax.numpy as jnp
 from jax.scipy.sparse.linalg import gmres as jax_gmres
 
-from .fci import FCIParameters
+from .fci import FCIParameters, FCIProfile, _block_until_ready
 from .operators import flatten_grid, unflatten_grid
 from .setup import HelmholtzOperator
 
@@ -29,6 +30,7 @@ class FastFCIResult:
     relres: Array
     matvecs_estimate: int
     inner_info: int | Array
+    profile: FCIProfile | None = None
 
 
 def fci_apply_spectral_jit(
@@ -39,6 +41,7 @@ def fci_apply_spectral_jit(
     inner_solver: str = "gmres",
     inner_steps: int = 5,
     inner_alpha: float | None = None,
+    profile: bool = False,
 ) -> FastFCIResult:
     """Apply one FCI step using JIT-compiled spectral kernels.
 
@@ -59,6 +62,12 @@ def fci_apply_spectral_jit(
             "inner_solver must be 'gmres', 'none', 'richardson', or 'chebyshev'."
         )
 
+    total_start = time.perf_counter() if profile else 0.0
+    shifted_solve_seconds: list[float] = []
+    contour_combine_seconds = 0.0
+    postprocess_seconds = 0.0
+    inner_seconds = 0.0
+
     rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex64))
     rhs_grid = unflatten_grid(rhs, op.n)
     u_grid = jnp.zeros_like(rhs_grid)
@@ -67,6 +76,7 @@ def fci_apply_spectral_jit(
     for p in range(params.npoles):
         z = params.shifts[p].astype(rhs_grid.dtype)
         z0 = jnp.asarray(complex(params.bet[0], complex(params.shifts[p]).imag), dtype=rhs_grid.dtype)
+        pole_start = time.perf_counter() if profile else 0.0
         v_grid = _exp_poly_grid_jit(
             rhs_grid,
             z,
@@ -78,13 +88,27 @@ def fci_apply_spectral_jit(
             int(params.q[p]),
             int(params.num[p]),
         )
+        if profile:
+            _block_until_ready(v_grid)
+            shifted_solve_seconds.append(time.perf_counter() - pole_start)
+
+        combine_start = time.perf_counter() if profile else 0.0
         u_grid = u_grid + params.weights[p].astype(rhs_grid.dtype) * v_grid
+        if profile:
+            _block_until_ready(u_grid)
+            contour_combine_seconds += time.perf_counter() - combine_start
         matvecs += int(params.q[p]) * int(params.num[p])
 
+    postprocess_start = time.perf_counter() if profile else 0.0
     au_grid = _helmop_grid_jit(u_grid, op.mass, op.damping, op.stiffness_eigs)
     c = jnp.vdot(au_grid, rhs_grid) / jnp.vdot(au_grid, au_grid)
     u_grid = c * u_grid
     residual_grid = rhs_grid - c * au_grid
+    if profile:
+        _block_until_ready((u_grid, residual_grid))
+        postprocess_seconds = time.perf_counter() - postprocess_start
+
+    inner_start = time.perf_counter() if profile else 0.0
     if inner_solver == "gmres":
         restart_cycles = max(1, math.ceil(max(matvecs, 1) * 2 / params.krylov_dim))
         correction_grid, info = jax_gmres(
@@ -95,6 +119,8 @@ def fci_apply_spectral_jit(
             maxiter=restart_cycles,
             solve_method="batched",
         )
+        if profile:
+            _block_until_ready(correction_grid)
         u_grid = u_grid + correction_grid
         matvecs_estimate = matvecs + restart_cycles * params.krylov_dim + 1
     elif inner_solver == "richardson":
@@ -112,6 +138,8 @@ def fci_apply_spectral_jit(
             alpha,
             inner_steps,
         )
+        if profile:
+            _block_until_ready((u_grid, residual_grid))
         info = 0
         matvecs_estimate = matvecs + inner_steps + 1
     elif inner_solver == "chebyshev":
@@ -124,20 +152,37 @@ def fci_apply_spectral_jit(
             jnp.asarray(op.rho[0], dtype=op.mass.dtype),
             inner_steps,
         )
+        if profile:
+            _block_until_ready((u_grid, residual_grid))
         info = 0
         matvecs_estimate = matvecs + inner_steps + 1
     else:
         info = 0
         matvecs_estimate = matvecs + 1
+    if profile:
+        _block_until_ready(u_grid)
+        inner_seconds = time.perf_counter() - inner_start
 
     final_residual = flatten_grid(residual_grid)
     relres = jnp.linalg.norm(residual_grid) / jnp.linalg.norm(rhs_grid)
+    if profile:
+        _block_until_ready((final_residual, relres))
+    timing_profile = None
+    if profile:
+        timing_profile = FCIProfile(
+            total_seconds=time.perf_counter() - total_start,
+            shifted_solve_seconds=tuple(shifted_solve_seconds),
+            contour_combine_seconds=contour_combine_seconds,
+            postprocess_seconds=postprocess_seconds,
+            inner_seconds=inner_seconds,
+        )
     return FastFCIResult(
         u=flatten_grid(u_grid),
         residual=final_residual,
         relres=relres,
         matvecs_estimate=matvecs_estimate,
         inner_info=info,
+        profile=timing_profile,
     )
 
 
