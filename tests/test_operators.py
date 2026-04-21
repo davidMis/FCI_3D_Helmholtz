@@ -136,6 +136,16 @@ def test_fast_spectral_fci_smoke():
     assert result_richardson.u.shape == (op.size,)
     assert jnp.all(jnp.isfinite(result_richardson.u))
 
+    result_chebyshev = fci_apply_spectral_jit(
+        flatten_grid(rhs_grid),
+        op,
+        params,
+        inner_solver="chebyshev",
+        inner_steps=2,
+    )
+    assert result_chebyshev.u.shape == (op.size,)
+    assert jnp.all(jnp.isfinite(result_chebyshev.u))
+
 
 def test_low_frequency_gmres_smoke():
     from jax import config

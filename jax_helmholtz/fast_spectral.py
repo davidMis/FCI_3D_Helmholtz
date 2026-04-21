@@ -52,8 +52,10 @@ def fci_apply_spectral_jit(
         raise ValueError("fci_apply_spectral_jit supports only nblock=1, method=1.")
     if op.stiffness_eigs is None:
         raise ValueError("spectral mode requires stiffness_eigs.")
-    if inner_solver not in {"gmres", "none", "richardson"}:
-        raise ValueError("inner_solver must be 'gmres', 'none', or 'richardson'.")
+    if inner_solver not in {"gmres", "none", "richardson", "chebyshev"}:
+        raise ValueError(
+            "inner_solver must be 'gmres', 'none', 'richardson', or 'chebyshev'."
+        )
 
     rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex64))
     rhs_grid = unflatten_grid(rhs, op.n)
@@ -106,6 +108,18 @@ def fci_apply_spectral_jit(
             op.damping,
             op.stiffness_eigs,
             alpha,
+            inner_steps,
+        )
+        info = 0
+        matvecs_estimate = matvecs + inner_steps + 1
+    elif inner_solver == "chebyshev":
+        u_grid, residual_grid = _chebyshev_inner_jit(
+            u_grid,
+            residual_grid,
+            op.mass,
+            op.damping,
+            op.stiffness_eigs,
+            jnp.asarray(op.rho[0], dtype=op.mass.dtype),
             inner_steps,
         )
         info = 0
@@ -206,7 +220,58 @@ def auto_richardson_alpha(
     return jnp.vdot(ar, residual) / jnp.vdot(ar, ar)
 
 
+def chebyshev_inner(
+    u: Array,
+    residual: Array,
+    mass: Array,
+    damping: Array,
+    stiffness_eigs: Array,
+    rho_hermitian: Array,
+    steps: int,
+) -> tuple[Array, Array]:
+    """Fixed-memory Chebyshev correction using the symmetric operator model.
+
+    This mirrors the one-block recurrence in ``cheby_poly`` with ``z=0`` but uses
+    the full Helmholtz residual update for the corrected solution.
+    """
+
+    c = rho_hermitian / 2
+    a = c - 1
+    beta0 = jnp.asarray(0 + 0j, dtype=u.dtype)
+    first_beta = beta0 + (-(c * c) / (2 * a))
+    beta_scale = beta0 + ((c / 2) ** 2)
+    dsol0 = jnp.zeros_like(u)
+
+    def body(k, state):
+        u_curr, r_curr, dsol, beta = state
+        gamma = -(a + beta)
+        dsol_next = (-r_curr + beta * dsol) / gamma
+        u_next = u_curr + dsol_next
+        r_next = r_curr - helmop_spectral_grid(
+            dsol_next,
+            mass,
+            damping,
+            stiffness_eigs,
+        )
+        beta_next = jax.lax.cond(
+            k < 1,
+            lambda _: first_beta,
+            lambda _: beta_scale / gamma,
+            operand=None,
+        )
+        return u_next, r_next, dsol_next, beta_next
+
+    u_out, r_out, _, _ = jax.lax.fori_loop(
+        0,
+        steps,
+        body,
+        (u, residual, dsol0, beta0),
+    )
+    return u_out, r_out
+
+
 _helmop_grid_jit = jax.jit(helmop_spectral_grid)
 _exp_poly_grid_jit = jax.jit(exp_poly_grid, static_argnames=("q", "niter"))
 _richardson_inner_jit = jax.jit(richardson_inner, static_argnames=("steps",))
 _auto_richardson_alpha = jax.jit(auto_richardson_alpha)
+_chebyshev_inner_jit = jax.jit(chebyshev_inner, static_argnames=("steps",))

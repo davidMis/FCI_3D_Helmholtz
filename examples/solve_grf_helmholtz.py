@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument("--krylov-dim", type=int, default=20)
     parser.add_argument(
         "--inner-solver",
-        choices=("gmres", "none", "richardson"),
+        choices=("gmres", "none", "richardson", "chebyshev"),
         default="gmres",
         help="Inner correction used by --fast-spectral. Use 'none' for very large grids.",
     )
