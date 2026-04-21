@@ -102,6 +102,14 @@ def main() -> None:
             "Shape is (samples, channels, n, n, n)."
         ),
     )
+    parser.add_argument(
+        "--training-data-only",
+        action="store_true",
+        help=(
+            "When writing --training-data-out, suppress regular wavespeed, "
+            "pressure, residual-history, and shifted-sample side files."
+        ),
+    )
     parser.add_argument("--ppw-min", type=float, default=2.25)
     parser.add_argument(
         "--frequency-cycles",
@@ -114,10 +122,16 @@ def main() -> None:
         parser.error("--save-shifted-samples currently requires --fast-spectral.")
     if args.training_data_out is not None and not args.fast_spectral:
         parser.error("--training-data-out currently requires --fast-spectral.")
+    if args.training_data_only and args.training_data_out is None:
+        parser.error("--training-data-only requires --training-data-out.")
     if args.batch_size < 1:
         parser.error("--batch-size must be positive.")
     if args.max_shifted_samples is not None and args.max_shifted_samples < 1:
         parser.error("--max-shifted-samples must be positive when set.")
+    if args.training_data_only:
+        args.no_save_pressure = True
+        args.no_save_wavespeed = True
+        args.save_shifted_samples = None
 
     config.update("jax_enable_x64", args.precision == "float64")
     real_dtype = jnp.float64 if args.precision == "float64" else jnp.float32
@@ -366,7 +380,8 @@ def solve_one_grf(
             np.save(sliced_path(pressure_path), center_slices(np.asarray(pressure)))
         else:
             np.save(pressure_path, np.asarray(pressure))
-    np.save(residual_path, np.asarray(residual_history))
+    if not args.training_data_only:
+        np.save(residual_path, np.asarray(residual_history))
 
     if args.no_save_wavespeed:
         print("wavespeed save skipped")
@@ -382,7 +397,10 @@ def solve_one_grf(
         print(f"pressure wrote {pressure_path}")
     print(f"frequency_cycles={frequency_cycles:.6e} ppw_min={ppw_min:.6e} kh_max={kh_max:.6e}")
     print(f"wavespeed min={jnp.min(wavespeed):.6e} max={jnp.max(wavespeed):.6e}")
-    print(f"residual history wrote {residual_path}")
+    if args.training_data_only:
+        print("residual history save skipped")
+    else:
+        print(f"residual history wrote {residual_path}")
     print(f"total matvecs={total_matvecs}")
     print(f"final relres={residual_history[-1]:.6e}")
     print(f"pressure norm={jnp.linalg.norm(u):.6e}")

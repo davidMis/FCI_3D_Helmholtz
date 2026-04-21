@@ -31,7 +31,8 @@ python3 examples/solve_grf_helmholtz.py \
   --fast-spectral \
   --inner-solver none \
   --max-refinement-steps 10 \
-  --training-data-out data/shifted_training_64_seed0_batch8.npy
+  --training-data-out data/shifted_training_64_seed0_batch8.npy \
+  --training-data-only
 ```
 
 The batched generator writes one GRF file with shape `(batch, n, n, n)`.
@@ -41,6 +42,9 @@ The solver can write one training tensor with shape
 `shifted_solution_real`, `shifted_solution_imag`, `shifted_residual_real`,
 `shifted_residual_imag`, `shift_real`, `shift_imag`, `kh_max`,
 `relres_before`, `step`, `pole_index`.
+
+Use `--training-data-only` to suppress the regular pressure, wavespeed,
+residual-history, and per-sample side files while generating the tensor.
 
 For debugging or metadata-rich exports, the older `--save-shifted-samples`
 option still writes one `medium_*.npz` file and one `shifted_sample_*.npz`
