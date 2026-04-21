@@ -1,5 +1,5 @@
 %% main script for the matrix-free preconditioner of the Helmholtz equation
-visual = false;  % whether to visualize
+visual = true;  % whether to visualize
 sparse = false;  % sparse or dense system
 
 % refine

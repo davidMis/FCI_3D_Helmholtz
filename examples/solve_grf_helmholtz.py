@@ -1,0 +1,105 @@
+"""Solve a Helmholtz test problem using the generated Gaussian random field."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import time
+
+from jax import config
+import jax.numpy as jnp
+import numpy as np
+
+from jax_helmholtz import fci_apply, fci_setup, flatten_grid, helmop
+from jax_helmholtz import mat_setup_from_wavespeed
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n", type=int, default=64)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--solve-tol", type=float, default=1e-3)
+    parser.add_argument("--max-refinement-steps", type=int, default=10)
+    parser.add_argument("--contrast-strength", type=float, default=0.20)
+    args = parser.parse_args()
+
+    config.update("jax_enable_x64", True)
+
+    label = f"{args.n}x{args.n}x{args.n}_grf_seed{args.seed}"
+    field_path = Path(f"data/grf_{args.n}x{args.n}x{args.n}_seed{args.seed}.npy")
+    pressure_path = Path(f"data/pressure_{label}.npy")
+    residual_path = Path(f"data/residual_history_{label}.npy")
+    wavespeed_path = Path(f"data/wavespeed_{label}.npy")
+
+    start_time = time.perf_counter()
+    grf = jnp.asarray(np.load(field_path), dtype=jnp.float64)
+    wavespeed = grf_to_wavespeed(grf, contrast_strength=args.contrast_strength)
+    np.save(wavespeed_path, np.asarray(wavespeed))
+
+    ppw_min = 2.25
+    kh_max = 2 * jnp.pi / ppw_min
+    op = mat_setup_from_wavespeed(wavespeed, kh_max, sparse=False)
+
+    rhs = point_source(op.n)
+    params = fci_setup(
+        npoles=1,
+        sep=0.4 * (40 / op.n[0]),
+        asp=0.5,
+        nblock=1,
+        method=1,
+        op=op,
+        tol_outer=2e-1,
+        tol_inner=2e-1,
+    )
+
+    u = jnp.zeros_like(rhs)
+    residual = rhs
+    rhs_norm = jnp.linalg.norm(rhs)
+    residual_history = []
+    total_matvecs = 0
+    for step in range(1, args.max_refinement_steps + 1):
+        result = fci_apply(residual, op, params)
+        u = u + result.u
+        residual = rhs - helmop(u, op)
+        relres = float(jnp.linalg.norm(residual) / rhs_norm)
+        total_matvecs += result.matvecs + 1
+        residual_history.append(relres)
+        print(
+            "refine "
+            f"step={step} relres={relres:.6e} "
+            f"step_matvecs={result.matvecs + 1} total_matvecs={total_matvecs}",
+            flush=True,
+        )
+        if relres < args.solve_tol:
+            break
+
+    pressure = jnp.reshape(u, op.n, order="F")
+    np.save(pressure_path, np.asarray(pressure))
+    np.save(residual_path, np.asarray(residual_history))
+    elapsed = time.perf_counter() - start_time
+
+    print(f"wavespeed wrote {wavespeed_path}")
+    print(f"pressure wrote {pressure_path}")
+    print(f"n={op.n} size={op.size} rho={op.rho}")
+    print(f"wavespeed min={jnp.min(wavespeed):.6e} max={jnp.max(wavespeed):.6e}")
+    print(f"residual history wrote {residual_path}")
+    print(f"total matvecs={total_matvecs}")
+    print(f"final relres={residual_history[-1]:.6e}")
+    print(f"pressure norm={jnp.linalg.norm(u):.6e}")
+    print(f"elapsed seconds={elapsed:.3f}")
+
+
+def grf_to_wavespeed(field: jnp.ndarray, *, contrast_strength: float) -> jnp.ndarray:
+    speed = jnp.exp(contrast_strength * field)
+    return speed / jnp.min(speed)
+
+
+def point_source(shape: tuple[int, int, int]) -> jnp.ndarray:
+    source = jnp.zeros(shape, dtype=jnp.complex128)
+    center = tuple(v // 2 for v in shape)
+    source = source.at[center].set(1 + 0j)
+    return flatten_grid(source)
+
+
+if __name__ == "__main__":
+    main()

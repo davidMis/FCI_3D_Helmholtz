@@ -1,0 +1,20 @@
+[project]
+name = "fci-3d-helmholtz-jax"
+version = "0.1.0"
+description = "JAX port of the fast contour integration 3D Helmholtz solver."
+requires-python = ">=3.10"
+dependencies = [
+    "jax",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+include = ["jax_helmholtz*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
