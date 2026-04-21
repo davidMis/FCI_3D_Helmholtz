@@ -24,6 +24,13 @@ def main() -> None:
     parser.add_argument("--precision", choices=("float32", "float64"), default="float64")
     parser.add_argument("--fast-spectral", action="store_true")
     parser.add_argument("--npoles", type=int, default=1)
+    parser.add_argument("--krylov-dim", type=int, default=20)
+    parser.add_argument(
+        "--inner-solver",
+        choices=("gmres", "none"),
+        default="gmres",
+        help="Inner correction used by --fast-spectral. Use 'none' for very large grids.",
+    )
     parser.add_argument("--ppw-min", type=float, default=2.25)
     parser.add_argument(
         "--frequency-cycles",
@@ -66,6 +73,7 @@ def main() -> None:
         nblock=1,
         method=1,
         op=op,
+        krylov_dim=args.krylov_dim,
         tol_outer=2e-1,
         tol_inner=2e-1,
     )
@@ -77,7 +85,12 @@ def main() -> None:
     total_matvecs = 0
     for step in range(1, args.max_refinement_steps + 1):
         if args.fast_spectral:
-            result = fci_apply_spectral_jit(residual, op, params)
+            result = fci_apply_spectral_jit(
+                residual,
+                op,
+                params,
+                inner_solver=args.inner_solver,
+            )
             step_solution = result.u
             step_matvecs = result.matvecs_estimate
         else:

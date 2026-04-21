@@ -33,6 +33,8 @@ def fci_apply_spectral_jit(
     rhs: Array,
     op: HelmholtzOperator,
     params: FCIParameters,
+    *,
+    inner_solver: str = "gmres",
 ) -> FastFCIResult:
     """Apply one FCI step using JIT-compiled spectral kernels.
 
@@ -48,6 +50,8 @@ def fci_apply_spectral_jit(
         raise ValueError("fci_apply_spectral_jit supports only nblock=1, method=1.")
     if op.stiffness_eigs is None:
         raise ValueError("spectral mode requires stiffness_eigs.")
+    if inner_solver not in {"gmres", "none"}:
+        raise ValueError("inner_solver must be 'gmres' or 'none'.")
 
     rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex64))
     rhs_grid = unflatten_grid(rhs, op.n)
@@ -74,22 +78,26 @@ def fci_apply_spectral_jit(
     au_grid = _helmop_grid_jit(u_grid, op.mass, op.damping, op.stiffness_eigs)
     c = jnp.vdot(au_grid, rhs_grid) / jnp.vdot(au_grid, au_grid)
     u_grid = c * u_grid
-    residual_grid = rhs_grid - c * au_grid
-
-    restart_cycles = max(1, math.ceil(max(matvecs, 1) * 2 / params.krylov_dim))
-    correction_grid, info = jax_gmres(
-        lambda x: _helmop_grid_jit(x, op.mass, op.damping, op.stiffness_eigs),
-        residual_grid,
-        tol=params.tol_inner,
-        restart=params.krylov_dim,
-        maxiter=restart_cycles,
-        solve_method="batched",
-    )
-    u_grid = u_grid + correction_grid
+    if inner_solver == "gmres":
+        residual_grid = rhs_grid - c * au_grid
+        restart_cycles = max(1, math.ceil(max(matvecs, 1) * 2 / params.krylov_dim))
+        correction_grid, info = jax_gmres(
+            lambda x: _helmop_grid_jit(x, op.mass, op.damping, op.stiffness_eigs),
+            residual_grid,
+            tol=params.tol_inner,
+            restart=params.krylov_dim,
+            maxiter=restart_cycles,
+            solve_method="batched",
+        )
+        u_grid = u_grid + correction_grid
+        matvecs_estimate = matvecs + restart_cycles * params.krylov_dim + 1
+    else:
+        info = 0
+        matvecs_estimate = matvecs + 1
 
     return FastFCIResult(
         u=flatten_grid(u_grid),
-        matvecs_estimate=matvecs + restart_cycles * params.krylov_dim + 1,
+        matvecs_estimate=matvecs_estimate,
         inner_info=info,
     )
 
