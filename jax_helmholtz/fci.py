@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 
 from .gmres import gmres
-from .operators import helmop
+from .operators import jit_helmop
 from .polynomial import cheby_poly, exp_poly
 from .polynomial import exp_rate
 from .setup import HelmholtzOperator
@@ -55,10 +55,12 @@ def fci_setup(
     """Set up contour shifts/weights and shifted-solver parameters."""
 
     dmax = op.rho[1]
+    real_dtype = op.mass.dtype
+    complex_dtype = jnp.result_type(real_dtype, jnp.complex64)
 
     if npoles == 1:
-        shifts = jnp.asarray([sep * 1j], dtype=jnp.complex128)
-        weights = jnp.asarray([1 + 0j], dtype=jnp.complex128)
+        shifts = jnp.asarray([sep * 1j], dtype=complex_dtype)
+        weights = jnp.asarray([1 + 0j], dtype=complex_dtype)
     else:
         phi = jnp.pi / npoles * jnp.arange(1, 2 * npoles, 2)
         dy = dmax * 0.7
@@ -70,8 +72,10 @@ def fci_setup(
             rx * jnp.cos(phi)
             + 1j * ry * jnp.sin(phi)
             - (dx + 1j * dy)
-        )
-        weights = (ry * jnp.cos(phi) + 1j * rx * jnp.sin(phi)) / shifts / npoles
+        ).astype(complex_dtype)
+        weights = (
+            (ry * jnp.cos(phi) + 1j * rx * jnp.sin(phi)) / shifts / npoles
+        ).astype(complex_dtype)
 
     if nblock == 1:
         bet = (op.rho[0] / 2 - 1, op.rho[0] / 2, dmax)
@@ -103,7 +107,7 @@ def fci_setup(
         bet=bet,
         num=jnp.asarray(num, dtype=jnp.int32),
         q=jnp.asarray(q_values, dtype=jnp.int32),
-        d=jnp.asarray(d_values, dtype=jnp.float64),
+        d=jnp.asarray(d_values, dtype=real_dtype),
     )
 
 
@@ -115,7 +119,7 @@ def fci_apply(rhs: Array, op: HelmholtzOperator, params: FCIParameters) -> FCIRe
     once the numerical behavior is verified.
     """
 
-    rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex128))
+    rhs = rhs.astype(jnp.result_type(rhs.dtype, jnp.complex64))
     nrm0 = jnp.linalg.norm(rhs)
     n = rhs.shape[0]
     u = jnp.zeros_like(rhs)
@@ -149,11 +153,11 @@ def fci_apply(rhs: Array, op: HelmholtzOperator, params: FCIParameters) -> FCIRe
                 tol,
                 int(params.num[p] * params.q[p]),
             )
-            w = shifted_rhs - (helmop(v, op) - z * v)
+            w = shifted_rhs - (jit_helmop(v, op) - z * v)
             w_norm = jnp.linalg.norm(w)
             if float(w_norm) > float(nrm0) * tol:
                 correction = gmres(
-                    lambda x, shift=z: helmop(x, op) - shift * x,
+                    lambda x, shift=z: jit_helmop(x, op) - shift * x,
                     w,
                     restart=params.krylov_dim,
                     tol=float(nrm0) * tol / float(w_norm),
@@ -173,14 +177,14 @@ def fci_apply(rhs: Array, op: HelmholtzOperator, params: FCIParameters) -> FCIRe
         u = u + params.weights[p] * v
 
     matvecs = nmvp
-    v = helmop(u, op)
+    v = jit_helmop(u, op)
     c = jnp.vdot(v, rhs) / jnp.vdot(v, v)
     u = c * u
     residual = rhs - c * v
 
     max_inner = max(1, int(jnp.ceil(nmvp * 2 / params.krylov_dim)) * params.krylov_dim)
     inner = gmres(
-        lambda x: helmop(x, op),
+        lambda x: jit_helmop(x, op),
         residual,
         restart=params.krylov_dim,
         tol=params.tol_inner,

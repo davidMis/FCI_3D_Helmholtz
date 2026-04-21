@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from .setup import HelmholtzOperator
@@ -60,6 +61,10 @@ def helmop(x: Array, op: HelmholtzOperator) -> Array:
     y1 = 1j * x2 - x1
     y2 = -1j * (stiffop(x1, op) + (1 - mass) * x1) - (1 + 1j * damping) * x2
     return jnp.concatenate([y1, y2])
+
+
+jit_stiffop = jax.jit(stiffop)
+jit_helmop = jax.jit(helmop)
 
 
 def helmsym(x: Array, op: HelmholtzOperator) -> Array:

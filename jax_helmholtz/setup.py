@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import math
 from typing import Literal
 
+import jax
 import jax.numpy as jnp
 
 
@@ -41,6 +42,29 @@ class HelmholtzOperator:
     @property
     def sparse(self) -> bool:
         return self.mode == "fd"
+
+    def tree_flatten(self):
+        children = (self.mass, self.damping, self.stiffness_eigs)
+        aux = (self.n, self.kh_min, self.kh_max, self.mode, self.rho)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        mass, damping, stiffness_eigs = children
+        n, kh_min, kh_max, mode, rho = aux
+        return cls(
+            n=n,
+            kh_min=kh_min,
+            kh_max=kh_max,
+            mode=mode,
+            mass=mass,
+            damping=damping,
+            rho=rho,
+            stiffness_eigs=stiffness_eigs,
+        )
+
+
+jax.tree_util.register_pytree_node_class(HelmholtzOperator)
 
 
 def mat_setup(
@@ -79,6 +103,7 @@ def mat_setup(
         kh_max=kh_max,
         mode=mode,
         sparse=sparse,
+        mass_lower_bound=contrast,
         dtype=dtype,
     )
 
@@ -112,6 +137,7 @@ def mat_setup_from_wavespeed(
         kh_max=kh_max,
         mode=mode,
         sparse=sparse,
+        mass_lower_bound=float(jnp.min(mass)),
         dtype=dtype,
     )
 
@@ -186,18 +212,18 @@ def _operator_from_mass(
     kh_max: float,
     mode: Mode,
     sparse: bool,
+    mass_lower_bound: float,
     dtype,
 ) -> HelmholtzOperator:
     shape = tuple(int(v) for v in mass.shape)
     damping = _absorbing_damping(shape, kh_max, sparse=sparse, dtype=dtype)
-    min_mass = float(jnp.min(mass))
 
     if sparse:
-        rho_hermitian = 12 / kh_max**2 + 1 - min_mass
+        rho_hermitian = 12 / kh_max**2 + 1 - mass_lower_bound
         stiffness_eigs = None
     else:
         stiffness_eigs = spectral_stiffness_eigs(shape, kh_max, dtype=dtype)
-        rho_hermitian = float(jnp.max(stiffness_eigs) + 1 - min_mass)
+        rho_hermitian = float(jnp.max(stiffness_eigs) + 1 - mass_lower_bound)
 
     return HelmholtzOperator(
         n=shape,

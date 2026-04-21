@@ -99,3 +99,20 @@ def test_setup_from_wavespeed_mass_convention():
     assert op.mass.shape == wavespeed.shape
     assert jnp.max(op.mass) == 1
     assert jnp.isclose(op.mass[1, 1, 1], 0.25)
+
+
+def test_fast_spectral_fci_smoke():
+    from jax import config
+    import jax.numpy as jnp
+
+    from jax_helmholtz import fci_apply_spectral_jit, fci_setup, flatten_grid, mat_setup
+
+    config.update("jax_enable_x64", True)
+    op = mat_setup((4, 4, 4), jnp.pi / 2.25, 2 * jnp.pi / 2.25)
+    rhs_grid = jnp.zeros(op.n, dtype=jnp.complex128).at[2, 2, 2].set(1 + 0j)
+    params = fci_setup(1, 0.4, 0.5, 1, 1, op, krylov_dim=4)
+
+    result = fci_apply_spectral_jit(flatten_grid(rhs_grid), op, params)
+
+    assert result.u.shape == (op.size,)
+    assert jnp.all(jnp.isfinite(result.u))

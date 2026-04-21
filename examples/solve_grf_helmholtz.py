@@ -10,7 +10,7 @@ from jax import config
 import jax.numpy as jnp
 import numpy as np
 
-from jax_helmholtz import fci_apply, fci_setup, flatten_grid, helmop
+from jax_helmholtz import fci_apply, fci_apply_spectral_jit, fci_setup, flatten_grid, jit_helmop
 from jax_helmholtz import mat_setup_from_wavespeed
 
 
@@ -21,28 +21,34 @@ def main() -> None:
     parser.add_argument("--solve-tol", type=float, default=1e-3)
     parser.add_argument("--max-refinement-steps", type=int, default=10)
     parser.add_argument("--contrast-strength", type=float, default=0.20)
+    parser.add_argument("--precision", choices=("float32", "float64"), default="float64")
+    parser.add_argument("--fast-spectral", action="store_true")
+    parser.add_argument("--npoles", type=int, default=1)
     args = parser.parse_args()
 
-    config.update("jax_enable_x64", True)
+    config.update("jax_enable_x64", args.precision == "float64")
+    real_dtype = jnp.float64 if args.precision == "float64" else jnp.float32
+    complex_dtype = jnp.complex128 if args.precision == "float64" else jnp.complex64
 
-    label = f"{args.n}x{args.n}x{args.n}_grf_seed{args.seed}"
+    solver_label = "fast_spectral" if args.fast_spectral else "reference"
+    label = f"{args.n}x{args.n}x{args.n}_grf_seed{args.seed}_{args.precision}_{solver_label}"
     field_path = Path(f"data/grf_{args.n}x{args.n}x{args.n}_seed{args.seed}.npy")
     pressure_path = Path(f"data/pressure_{label}.npy")
     residual_path = Path(f"data/residual_history_{label}.npy")
     wavespeed_path = Path(f"data/wavespeed_{label}.npy")
 
     start_time = time.perf_counter()
-    grf = jnp.asarray(np.load(field_path), dtype=jnp.float64)
+    grf = jnp.asarray(np.load(field_path), dtype=real_dtype)
     wavespeed = grf_to_wavespeed(grf, contrast_strength=args.contrast_strength)
     np.save(wavespeed_path, np.asarray(wavespeed))
 
     ppw_min = 2.25
     kh_max = 2 * jnp.pi / ppw_min
-    op = mat_setup_from_wavespeed(wavespeed, kh_max, sparse=False)
+    op = mat_setup_from_wavespeed(wavespeed, kh_max, sparse=False, dtype=real_dtype)
 
-    rhs = point_source(op.n)
+    rhs = point_source(op.n, dtype=complex_dtype)
     params = fci_setup(
-        npoles=1,
+        npoles=args.npoles,
         sep=0.4 * (40 / op.n[0]),
         asp=0.5,
         nblock=1,
@@ -58,16 +64,24 @@ def main() -> None:
     residual_history = []
     total_matvecs = 0
     for step in range(1, args.max_refinement_steps + 1):
-        result = fci_apply(residual, op, params)
-        u = u + result.u
-        residual = rhs - helmop(u, op)
+        if args.fast_spectral:
+            result = fci_apply_spectral_jit(residual, op, params)
+            step_solution = result.u
+            step_matvecs = result.matvecs_estimate
+        else:
+            result = fci_apply(residual, op, params)
+            step_solution = result.u
+            step_matvecs = result.matvecs + 1
+
+        u = u + step_solution
+        residual = rhs - jit_helmop(u, op)
         relres = float(jnp.linalg.norm(residual) / rhs_norm)
-        total_matvecs += result.matvecs + 1
+        total_matvecs += step_matvecs
         residual_history.append(relres)
         print(
             "refine "
             f"step={step} relres={relres:.6e} "
-            f"step_matvecs={result.matvecs + 1} total_matvecs={total_matvecs}",
+            f"step_matvecs={step_matvecs} total_matvecs={total_matvecs}",
             flush=True,
         )
         if relres < args.solve_tol:
@@ -94,8 +108,8 @@ def grf_to_wavespeed(field: jnp.ndarray, *, contrast_strength: float) -> jnp.nda
     return speed / jnp.min(speed)
 
 
-def point_source(shape: tuple[int, int, int]) -> jnp.ndarray:
-    source = jnp.zeros(shape, dtype=jnp.complex128)
+def point_source(shape: tuple[int, int, int], *, dtype) -> jnp.ndarray:
+    source = jnp.zeros(shape, dtype=dtype)
     center = tuple(v // 2 for v in shape)
     source = source.at[center].set(1 + 0j)
     return flatten_grid(source)

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
-from .operators import helmop, helmsym
+from .operators import helmsym, jit_helmop
 from .setup import HelmholtzOperator
 
 
@@ -23,11 +24,12 @@ def exp_rate(
     """
 
     bet = jnp.asarray(bet)
+    complex_dtype = jnp.result_type(bet.dtype, jnp.complex64)
     z = complex(z)
     zre = z.real
     zim = z.imag
 
-    b = jnp.asarray([bet[0] - bet[1], bet[0] + bet[1]], dtype=jnp.complex128) - z
+    b = jnp.asarray([bet[0] - bet[1], bet[0] + bet[1]], dtype=complex_dtype) - z
     if zim < 0:
         b = b - 1j * bet[2]
     ba = jnp.abs(b)
@@ -89,7 +91,7 @@ def exp_poly(
     for _ in range(niter):
         k = sol
         for j in range(1, q + 1):
-            k = (wd / j) * (helmop(k, op) - z0 * k - wv[j - 1] * rhs)
+            k = (wd / j) * (jit_helmop(k, op) - z0 * k - wv[j - 1] * rhs)
             nmv += 1
             if j == 1:
                 relres = float(jnp.linalg.norm(k - wdz * sol) / nrm0 / abs(wd))
@@ -132,7 +134,7 @@ def cheby_poly(
         gamma = -(a + beta)
         dsol = (-r + beta * dsol) / gamma
         sol = sol + dsol
-        r = rhs - (helmsym(sol, op) - z * sol)
+        r = rhs - (jit_helmsym(sol, op) - z * sol)
         relres = float(jnp.linalg.norm(r) / nrm0)
         nmv += 1
         if nmv < 2:
@@ -147,7 +149,8 @@ def ric_rate(z: complex, bet: tuple[float, float, float] | Array) -> tuple[compl
     """Optimal stationary Richardson parameter for rectangular spectrum."""
 
     bet = jnp.asarray(bet)
-    b = jnp.asarray([bet[0] - bet[1], bet[0] + bet[1]], dtype=jnp.complex128) - z
+    complex_dtype = jnp.result_type(bet.dtype, jnp.complex64)
+    b = jnp.asarray([bet[0] - bet[1], bet[0] + bet[1]], dtype=complex_dtype) - z
     if complex(z).imag < 0:
         b = b - 1j * bet[2]
 
@@ -175,7 +178,7 @@ def ric_poly(
 
     for it in range(1, niter + 1):
         sol = sol + d * res
-        res = rhs - helmop(sol, op) + z * sol
+        res = rhs - jit_helmop(sol, op) + z * sol
         relres = float(jnp.linalg.norm(res) / nrm0)
         nmv = it
         if relres < tol:
@@ -191,3 +194,6 @@ def _exp_convrate(d: float, z: Array, q: int) -> Array:
         k = k * z * (d / j)
         c = c + k
     return jnp.max(jnp.abs(c[:-1]) / jnp.abs(c[-1]))
+
+
+jit_helmsym = jax.jit(helmsym)
