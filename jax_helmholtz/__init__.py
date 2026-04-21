@@ -3,6 +3,7 @@
 from .fci import FCIParameters, FCIResult, fci_apply, fci_setup
 from .fast_spectral import FastFCIResult, fci_apply_spectral_jit
 from .gmres import GMRESResult, gmres
+from .low_frequency import GMRESSolveResult, solve_gmres_spectral
 from .operators import flatten_grid, helmop, jit_helmop, jit_stiffop, stiffop, unflatten_grid
 from .polynomial import cheby_poly, exp_poly, exp_rate, ric_poly, ric_rate
 from .random_fields import gaussian_random_field
@@ -13,6 +14,7 @@ __all__ = [
     "FCIResult",
     "FastFCIResult",
     "GMRESResult",
+    "GMRESSolveResult",
     "HelmholtzOperator",
     "cheby_poly",
     "exp_poly",
@@ -30,6 +32,7 @@ __all__ = [
     "mat_setup_from_wavespeed",
     "ric_poly",
     "ric_rate",
+    "solve_gmres_spectral",
     "stiffop",
     "unflatten_grid",
 ]

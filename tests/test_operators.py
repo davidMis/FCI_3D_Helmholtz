@@ -116,3 +116,26 @@ def test_fast_spectral_fci_smoke():
 
     assert result.u.shape == (op.size,)
     assert jnp.all(jnp.isfinite(result.u))
+
+
+def test_low_frequency_gmres_smoke():
+    from jax import config
+    import jax.numpy as jnp
+
+    from jax_helmholtz import flatten_grid, mat_setup, solve_gmres_spectral
+
+    config.update("jax_enable_x64", True)
+    op = mat_setup((4, 4, 4), jnp.pi / 8.0, 2 * jnp.pi / 8.0)
+    rhs_grid = jnp.zeros(op.n, dtype=jnp.complex128).at[2, 2, 2].set(1 + 0j)
+
+    result = solve_gmres_spectral(
+        flatten_grid(rhs_grid),
+        op,
+        tol=1e-2,
+        restart=8,
+        max_cycles=3,
+    )
+
+    assert result.u.shape == (op.size,)
+    assert result.residual_history.shape[0] >= 1
+    assert jnp.all(jnp.isfinite(result.u))
